@@ -86,7 +86,7 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
             self.labels = file.read().splitlines()
 
         # Create the tensorflow-lite interpreter
-        self.interpreter = tf.Interpreter(model_path="best_int8.tflite",
+        self.interpreter = tf.Interpreter(model_path="best_float32.tflite",
                                           experimental_delegates=delegates)
 
         # Allocate tensors.

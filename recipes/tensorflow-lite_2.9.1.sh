@@ -10,7 +10,7 @@ BUILD_NUM_JOBS=16
 B='/tflite-build'
 B2='/tflite-build-tools'
 CUSTOM_MODEL_DIR="models"
-CUSTOM_MODEL_FILE="best_int8.tflite"
+CUSTOM_MODEL_FILE="best_float32.tflite"
 CUSTOM_LABELS_FILE="labels.txt"
 
 ## Get Tensorflow Code ##
