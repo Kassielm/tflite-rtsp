@@ -1,0 +1,59 @@
+variables:
+  DOCKERFILE_FOLDER: "tflite/tflite-rtsp/"
+
+# Stages
+stages:
+  - lint
+  - repository tagging
+  - build
+  - deploy
+
+# Scripts
+include:
+  - /.gitlab-ci-scripts.yml
+
+# Jobs
+# Only for 64-bit vivante arch
+
+default:
+  # retry failed jobs, since Docker is not very stable when running many jobs in parallel
+  retry: 2
+
+dockerfile-lint-tflite:
+  extends: .dockerfile-lint
+  stage: lint
+
+tag-tflite-rtsp:
+  extends: .tag
+  before_script:
+    - export MAJOR="${DEBIAN_MAJOR}"
+    - export MINOR="${DEBIAN_MINOR}"
+    - export PATCH="${DEBIAN_PATCH}"
+  stage: repository tagging
+  variables:
+    SAMPLE_NAME: tflite-rtsp
+
+docker-build-tflite-rtsp-arm64v8:
+  extends: .docker-build
+  before_script:
+    - export MAJOR="${DEBIAN_MAJOR}"
+    - export MINOR="${DEBIAN_MINOR}"
+    - export PATCH="${DEBIAN_PATCH}"
+  variables:
+    BASE_NAME: debian
+    IMAGE_NAME: arm64v8-sample-tflite-rtsp
+    IMAGE_ARCH: linux/arm64/v8
+    PKG_ARCH: aarch64
+    IMAGE_TAG: ${DEBIAN_RELEASE_NUMBER}-${DEBIAN_RELEASE}
+  stage: build
+
+docker-deploy-tflite-rtsp-arm64v8:
+  extends: .docker-deploy
+  before_script:
+    - export DEBIAN_RELEASE_APPEND="-${DEBIAN_RELEASE}"
+    - export MAJOR="${DEBIAN_MAJOR}"
+    - export MINOR="${DEBIAN_MINOR}"
+    - export PATCH="${DEBIAN_PATCH}"
+  variables:
+    IMAGE_NAME: arm64v8-sample-tflite-rtsp
+  stage: deploy
