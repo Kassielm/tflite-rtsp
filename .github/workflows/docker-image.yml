@@ -28,7 +28,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: ./tflite-rtsp 
+          context: .
           platforms: linux/arm64
           push: true
           tags: kassiell/tflite-rtsp:latest
