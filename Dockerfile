@@ -25,6 +25,7 @@ WORKDIR /build
 COPY recipes /build
 
 ### Install TensorFlow Lite
+RUN chmod +x *.sh
 RUN ./nn-imx_1.3.0.sh
 RUN ./tim-vx.sh
 RUN ./tensorflow-lite_2.9.1.sh
