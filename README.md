@@ -10,7 +10,7 @@ This sample is only validated for the following hardware:
 - Verdin iMX8M Plus: NPU/GPU/CPU
 - Apalis iMX8Q Max/Plus: GPU/CPU
 - Colibri iMX8QXP: GPU/CPU
-  - The Colibri iMX8QXP is not recommended to run this sample, but is suitable for lighter machine learning models.
+  - The Colibri iMX8QXP is not recommended to run this sample, but is suitable for lighter machine learning models
 
 Please refer to [Torizon Sample: Real Time Object Detection with Tensorflow Lite](https://developer.toradex.com/torizon/how-to/machine-learning/torizon-sample-real-time-tensorflow-lite) to learn more about this sample.
 
