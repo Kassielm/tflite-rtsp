@@ -94,27 +94,26 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
 
     # Funtion to be ran for every frame that is requested for the stream
     def on_need_data(self, src, length):
-
         if self.cap.isOpened():
             # Read the image from the camera
             ret, frame = self.cap.read()
 
             if ret:
-                # Resize the image to the size required for inference
-                input_image = cv2.resize(frame, (self.input_width, self.input_height))
+                # Resize and convert to RGB
+                input_image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                input_image = cv2.resize(input_image_rgb, (self.input_width, self.input_height))
                 
-                # Check if the model is quantized (INT8)
-                input_details = self.input_details[0]
-                is_quantized = input_details['dtype'] == np.int8 or input_details['dtype'] == np.uint8
+                # --- CORREÇÃO APLICADA AQUI ---
+                # Converte a imagem para float32 ANTES de qualquer outra operação
+                input_data = np.expand_dims(input_image.astype(np.float32), axis=0)
+                
+                # Normaliza a imagem se o modelo esperar float (ex: de -1 a 1 ou 0 a 1)
+                # A maioria dos modelos YOLO espera valores normalizados de 0 a 1.
+                input_data = input_data / 255.0
 
-                if is_quantized:
-                    # Quantize the input frame
-                    input_scale, input_zero_point = input_details['quantization']
-                    input_image = (input_image / input_scale) + input_zero_point
-                    input_image = input_image.astype(input_details['dtype'])
-                
-                # Add the batch dimension
-                input_data = np.expand_dims(input_image, axis=0)
+                # Se o modelo for INT8, o delegate da NPU lida com a quantização a partir do float.
+                # O importante é que o tipo enviado corresponda ao que a assinatura de entrada do modelo pede.
+                # O erro confirma que ele espera FLOAT32.
                 
                 # Set the input tensor and run inference
                 t1=time()
@@ -122,14 +121,14 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
                 self.interpreter.invoke()
                 t2=time()
                 
-                # --- NEW YOLOv8 POST-PROCESSING LOGIC ---
+                # --- LÓGICA DE PÓS-PROCESSAMENTO DO YOLOv8 (mantém-se igual) ---
 
                 # 1. Get the single output tensor
                 output_data = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
 
                 # De-quantize if necessary
-                if is_quantized:
-                    output_details = self.output_details[0]
+                output_details = self.output_details[0]
+                if output_details['dtype'] == np.int8 or output_details['dtype'] == np.uint8:
                     output_scale, output_zero_point = output_details['quantization']
                     output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
 
@@ -164,7 +163,6 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
                         boxes.append([x1, y1, x2, y2])
 
                 # 4. Apply Non-Maximum Suppression (NMS) to remove redundant boxes
-                # Convert boxes from [x1, y1, x2, y2] to [x, y, w, h] format for NMS function
                 boxes_for_nms = []
                 for box in boxes:
                     x1, y1, x2, y2 = box
