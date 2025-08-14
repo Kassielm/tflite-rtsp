@@ -32,25 +32,6 @@ CAPTURE_FRAMERATE = int(os.environ.get("CAPTURE_FRAMERATE", default = 30))
 
 STREAM_BITRATE = int(os.environ.get("STREAM_BITRATE", default = 2048))
 
-## Helper function to draw bounding boxes
-def draw_bounding_boxes(img,labels,x1,x2,y1,y2,object_class):
-    # Define some colors to display bounding boxes
-    box_colors=[(254,153,143),(253,156,104),(253,157,13),(252,204,26),
-             (254,254,51),(178,215,50),(118,200,60),(30,71,87),
-             (1,48,178),(59,31,183),(109,1,142),(129,14,64)]
-
-    text_colors=[(0,0,0),(0,0,0),(0,0,0),(0,0,0),
-             (0,0,0),(0,0,0),(0,0,0),(255,255,255),
-            (255,255,255),(255,255,255),(255,255,255),(255,255,255)]
-
-    cv2.rectangle(img,(x2,y2),(x1,y1),
-                box_colors[object_class%len(box_colors)],2)
-    cv2.rectangle(img,(x1+len(labels[object_class])*10,y1+15),(x1,y1),
-                box_colors[object_class%len(box_colors)],-1)
-    cv2.putText(img,labels[object_class],(x1,y1+10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                text_colors[(object_class)%len(text_colors)],1,cv2.LINE_AA)
-
 ## Media factory that runs inference
 class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, **properties):
@@ -84,6 +65,10 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
         # Load the Object Detection model and its labels
         with open("labels.txt", "r") as file:
             self.labels = file.read().splitlines()
+        
+        # Define some colors to display bounding boxes, one for each class
+        self.colors = [ (np.random.randint(0, 256), np.random.randint(0, 256), np.random.randint(0, 256)) for _ in self.labels]
+
 
         # Create the tensorflow-lite interpreter
         self.interpreter = tf.Interpreter(model_path="best_float32_edgetpu.tflite",
@@ -95,7 +80,16 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
         # Get input and output tensors.
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
-        self.input_size=self.input_details[0]['shape'][1]
+        
+        # Get input size and scaling ratios for drawing boxes
+        self.input_height = self.input_details[0]['shape'][1]
+        self.input_width = self.input_details[0]['shape'][2]
+        self.height_ratio = CAPTURE_RESOLUTION_Y / self.input_height
+        self.width_ratio = CAPTURE_RESOLUTION_X / self.input_width
+
+        # Thresholds for post-processing
+        self.iou_threshold = 0.5 # Intersection Over Union threshold
+        self.threshold = MINIMUM_SCORE # Confidence score threshold
 
 
     # Funtion to be ran for every frame that is requested for the stream
@@ -103,73 +97,103 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
 
         if self.cap.isOpened():
             # Read the image from the camera
-            ret, image_original = self.cap.read()
+            ret, frame = self.cap.read()
 
             if ret:
                 # Resize the image to the size required for inference
-                height1=image_original.shape[0]
-                width1=image_original.shape[1]
-                image=cv2.resize(image_original,
-                                (self.input_size,int(self.input_size*height1/width1)),
-                                interpolation=cv2.INTER_NEAREST)
-                height2=image.shape[0]
-                scale=height1/height2
-                border_top=int((self.input_size-height2)/2)
-                image=cv2.copyMakeBorder(image,
-                                border_top,
-                                self.input_size-height2-border_top,
-                                0,0,cv2.BORDER_CONSTANT,value=(0,0,0))
+                input_image = cv2.resize(frame, (self.input_width, self.input_height))
+                
+                # Check if the model is quantized (INT8)
+                input_details = self.input_details[0]
+                is_quantized = input_details['dtype'] == np.int8 or input_details['dtype'] == np.uint8
 
-                # Set the input tensor
-                input=np.array([cv2.cvtColor(image, cv2.COLOR_BGR2RGB)],dtype=np.uint8)
-
-                # Normalize pixel values if using a floating model (i.e. if model is non-quantized)
-                # This is valid for mobilenet architecture and may not be valid for other architectures 
-                if self.input_details[0]['dtype'] == np.float32:
-                    input = (np.float32(input) - 127.5) / 127.5
-
-                self.interpreter.set_tensor(self.input_details[0]['index'], input)
-
-                # Execute the inference
+                if is_quantized:
+                    # Quantize the input frame
+                    input_scale, input_zero_point = input_details['quantization']
+                    input_image = (input_image / input_scale) + input_zero_point
+                    input_image = input_image.astype(input_details['dtype'])
+                
+                # Add the batch dimension
+                input_data = np.expand_dims(input_image, axis=0)
+                
+                # Set the input tensor and run inference
                 t1=time()
+                self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
                 self.interpreter.invoke()
                 t2=time()
                 
-                # Check output layer name to determine if this model was created with TF2 or TF1,
-                # because outputs are ordered differently for TF2 and TF1 models. This is valid
-                # for mobilenet architecture and may not be valid for other architectures
-                outname = self.output_details[0]['name']
+                # --- NEW YOLOv8 POST-PROCESSING LOGIC ---
 
-                if ('StatefulPartitionedCall' in outname): # This is a TF2 model
-                    locations_idx, classes_idx, scores_idx, detections_idx = 1, 3, 0, 2
-                else: # This is a TF1 model
-                    locations_idx, classes_idx, scores_idx, detections_idx = 0, 1, 2, 3
+                # 1. Get the single output tensor
+                output_data = self.interpreter.get_tensor(self.output_details[0]['index'])[0]
 
-                # Check the detected object locations, classes and scores.
-                locations = (self.interpreter.get_tensor(self.output_details[locations_idx]['index'])[0]*width1).astype(int)
-                locations[locations < 0] = 0
-                locations[locations > width1] = width1
-                classes = self.interpreter.get_tensor(self.output_details[classes_idx]['index'])[0].astype(int)
-                scores = self.interpreter.get_tensor(self.output_details[scores_idx]['index'])[0]
-                n_detections = self.interpreter.get_tensor(self.output_details[detections_idx]['index'])[0].astype(int)
+                # De-quantize if necessary
+                if is_quantized:
+                    output_details = self.output_details[0]
+                    output_scale, output_zero_point = output_details['quantization']
+                    output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
 
-                # Draw the bounding boxes for the detected objects
-                img = image_original
-                for i in range(n_detections):
-                    if (scores[i]>MINIMUM_SCORE):
-                        y1 = locations[i,0]-int(border_top*scale)
-                        x1 = locations[i,1]
-                        y2 = locations[i,2]-int(border_top*scale)
-                        x2 = locations[i,3]
-                        draw_bounding_boxes(img,self.labels,x1,x2,y1,y2,classes[i])
+                # 2. Transpose the output from [7, 8400] to [8400, 7]
+                outputs = np.transpose(output_data)
+
+                # 3. Build lists of boxes, scores and class IDs
+                boxes = []
+                scores = []
+                class_ids = []
+
+                for row in outputs:
+                    # Get box coordinates [cx, cy, w, h] and class probabilities
+                    box_coords = row[:4]
+                    class_probs = row[4:]
+
+                    # Find the class with the highest probability
+                    class_id = np.argmax(class_probs)
+                    max_score = class_probs[class_id]
+
+                    # Filter out detections with low confidence
+                    if max_score > self.threshold:
+                        scores.append(max_score)
+                        class_ids.append(class_id)
+                        
+                        # Convert box from [cx, cy, w, h] to [x1, y1, x2, y2] and scale it
+                        cx, cy, w, h = box_coords
+                        x1 = int((cx - w / 2) * self.width_ratio)
+                        y1 = int((cy - h / 2) * self.height_ratio)
+                        x2 = int((cx + w / 2) * self.width_ratio)
+                        y2 = int((cy + h / 2) * self.height_ratio)
+                        boxes.append([x1, y1, x2, y2])
+
+                # 4. Apply Non-Maximum Suppression (NMS) to remove redundant boxes
+                # Convert boxes from [x1, y1, x2, y2] to [x, y, w, h] format for NMS function
+                boxes_for_nms = []
+                for box in boxes:
+                    x1, y1, x2, y2 = box
+                    boxes_for_nms.append([x1, y1, x2 - x1, y2 - y1])
+
+                if len(boxes_for_nms) > 0:
+                    indices = cv2.dnn.NMSBoxes(boxes_for_nms, scores, self.threshold, self.iou_threshold)
+                else:
+                    indices = []
+
+                # 5. Draw the final bounding boxes on the original frame
+                for i in indices:
+                    box = boxes[i]
+                    x1, y1, x2, y2 = box
+                    label = self.labels[class_ids[i]]
+                    score = scores[i]
+                    color = self.colors[class_ids[i]]
+
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, f"{label}: {score:.2f}", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
                 # Draw the inference time
-                cv2.rectangle(img,(0,0),(130,20),(255,0,0),-1)
-                cv2.putText(img,"inf time: %.3fs" % (t2-t1),(0,15),cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                cv2.rectangle(frame,(0,0),(130,20),(0,0,255),-1)
+                cv2.putText(frame,"inf time: %.3fs" % (t2-t1),(0,15),cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (255,255,255),1,cv2.LINE_AA)
 
-                # Create and setup buffer
-                data = GLib.Bytes.new_take(img.tobytes())
+                # Create and setup buffer for streaming
+                data = GLib.Bytes.new_take(frame.tobytes())
                 buf = Gst.Buffer.new_wrapped_bytes(data)
                 buf.duration = self.duration
                 timestamp = self.number_frames * self.duration
@@ -178,9 +202,7 @@ class InferenceDataFactory(GstRtspServer.RTSPMediaFactory):
                 self.number_frames += 1
 
                 # Emit buffer
-                retval = src.emit('push-buffer', buf)
-                if retval != Gst.FlowReturn.OK:
-                    print(retval)
+                src.emit('push-buffer', buf)
 
     def do_create_element(self, url):
         return Gst.parse_launch(self.launch_string)
